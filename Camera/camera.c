@@ -1,0 +1,485 @@
+#include "common.h"
+#include "camera.h"
+#include "sccb.h"
+#include "debug.h"
+#include "stm32f4xx_dcmi.h"
+#include "stm32f4xx_dma.h"
+#include "misc.h"
+#include "lcd.h"
+
+u32 FrameCounter = 0;
+
+void CAM_SetDMA()
+{
+    DMA_InitTypeDef DMA_InitStructure;
+    DMA_DeInit(DMA2_Stream1);
+    while (DMA_GetCmdStatus(DMA2_Stream1) != DISABLE)
+        ;
+    DMA_InitStructure.DMA_Channel = DMA_Channel_1;
+    DMA_InitStructure.DMA_PeripheralBaseAddr = (u32)&DCMI->DR;
+    DMA_InitStructure.DMA_Memory0BaseAddr = (u32)((u16 *)(LCD_BASE | (1 << 7)));
+    DMA_InitStructure.DMA_DIR = DMA_DIR_PeripheralToMemory;
+    DMA_InitStructure.DMA_BufferSize = 1;                                   //数据传输量
+    DMA_InitStructure.DMA_PeripheralInc = DMA_PeripheralInc_Disable;        //外设非增量模式
+    DMA_InitStructure.DMA_MemoryInc = DMA_MemoryInc_Disable;                //存储器增量模式
+    DMA_InitStructure.DMA_PeripheralDataSize = DMA_PeripheralDataSize_Word; //外设数据长度:32位
+    DMA_InitStructure.DMA_MemoryDataSize = DMA_MemoryDataSize_HalfWord;     //存储器数据长度16
+    DMA_InitStructure.DMA_Mode = DMA_Mode_Circular;                         //使用循环模式
+    DMA_InitStructure.DMA_Priority = DMA_Priority_High;                     //高优先级
+    DMA_InitStructure.DMA_FIFOMode = DMA_FIFOMode_Enable;                   //FIFO模式
+    DMA_InitStructure.DMA_FIFOThreshold = DMA_FIFOThreshold_Full;           //使用全FIFO
+    DMA_InitStructure.DMA_MemoryBurst = DMA_MemoryBurst_Single;             //外设突发单次传输
+    DMA_InitStructure.DMA_PeripheralBurst = DMA_PeripheralBurst_Single;     //存储器突发单次传输
+    DMA_Init(DMA2_Stream1, &DMA_InitStructure);
+}
+
+void CAM_DCMI_Init()
+{
+    DCMI_InitTypeDef DCMI_InitStructure;
+    NVIC_InitTypeDef NVIC_InitStructure;
+    DCMI_DeInit();
+    DCMI_InitStructure.DCMI_CaptureMode = DCMI_CaptureMode_Continuous;
+    // DCMI_InitStructure.DCMI_CaptureMode = DCMI_CaptureMode_SnapShot;
+    DCMI_InitStructure.DCMI_CaptureRate = DCMI_CaptureRate_1of4_Frame;
+    DCMI_InitStructure.DCMI_ExtendedDataMode = DCMI_ExtendedDataMode_8b; //8位数据格式
+    DCMI_InitStructure.DCMI_HSPolarity = DCMI_HSPolarity_Low;            //HSYNC 低电平有效
+    DCMI_InitStructure.DCMI_VSPolarity = DCMI_VSPolarity_High;           //VSYNC 高电平有效
+    DCMI_InitStructure.DCMI_PCKPolarity = DCMI_PCKPolarity_Rising;       //PCLK 上升沿有效
+    DCMI_InitStructure.DCMI_SynchroMode = DCMI_SynchroMode_Hardware;     //硬件同步HSYNC,VSYNC
+    DCMI_Init(&DCMI_InitStructure);
+    DCMI_ITConfig(DCMI_IT_FRAME | DCMI_IT_OVF, ENABLE); //开启帧中断
+    DCMI_Cmd(ENABLE);                                   //DCMI使能
+    NVIC_InitStructure.NVIC_IRQChannel = DCMI_IRQn;
+    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 1; //抢占优先级1
+    NVIC_InitStructure.NVIC_IRQChannelSubPriority = 2;        //子优先级3
+    NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;           //IRQ通道使能
+    NVIC_Init(&NVIC_InitStructure);
+}
+
+void DCMI_IRQHandler()
+{
+    if (DCMI_GetITStatus(DCMI_IT_FRAME) != RESET)
+    {
+        DCMI_ClearITPendingBit(DCMI_IT_FRAME);
+        FrameCounter++;
+        printf("Frame: %ld\n", FrameCounter);
+    }
+    if (DCMI_GetITStatus(DCMI_IT_OVF) != RESET)
+    {
+        DCMI_ClearITPendingBit(DCMI_IT_OVF);
+        printf("DCMI Overflow\n");
+    }
+}
+
+void CAM_SetWindow(u16 startx, u16 starty, u16 width, u16 height)
+{
+    u16 endx = (startx + width * 2) % 784;
+    u16 endy = (starty + height * 2);
+    u8 x_reg, y_reg;
+    u8 temp;
+
+    x_reg = SCCB_RD_Reg(0x32) & 0xC0;
+    y_reg = SCCB_RD_Reg(0x03) & 0xF0;
+
+    //设置 HREF
+    //32: xx endLsb3 startLsb3
+    temp = x_reg | ((endx & 0x7) << 3) | (startx & 0x7);
+    SCCB_WR_Reg(0x32, temp);
+    //17: startMsb8
+    temp = (startx & 0x7F8) >> 3;
+    SCCB_WR_Reg(0x17, temp);
+    //18: endMsb8
+    temp = (endx & 0x7F8) >> 3;
+    SCCB_WR_Reg(0x18, temp);
+
+    //设置 VREF
+    temp = y_reg | ((endy & 0x3) << 2) | (starty & 0x3);
+    SCCB_WR_Reg(0x03, temp);
+    temp = (starty & 0x3FC) >> 2;
+    SCCB_WR_Reg(0x19, temp);
+    temp = (endy & 0x3FC) >> 2;
+    SCCB_WR_Reg(0x1A, temp);
+}
+
+u8 CAM_Init()
+{
+    SCCB_Init();
+    CAM_PWDN = 0;
+    Delay_ms(10);
+    CAM_RST = 0;
+    Delay_ms(10);
+    CAM_RST = 1;
+    Delay_ms(100);
+    SCCB_WR_Reg(0x12, 0x80); //Soft reset
+    Delay_ms(100);
+    u32 id = 0;
+    id |= SCCB_RD_Reg(0x1C) << 24;
+    id |= SCCB_RD_Reg(0x1D) << 16;
+    id |= SCCB_RD_Reg(0x0A) << 8;
+    id |= SCCB_RD_Reg(0x0B);
+    if (id != CAM_ID)
+    {
+        printf("Camera ID error: %lX\n", id);
+        return 1;
+    }
+    //init camera registers
+    
+    //买模块给的程序
+    SCCB_WR_Reg(0x3a, 0x04);
+	SCCB_WR_Reg(0x40, 0xd0);
+	SCCB_WR_Reg(0x12, 0x14);
+	SCCB_WR_Reg(0x32, 0x80);
+	SCCB_WR_Reg(0x17, 0x16);
+	SCCB_WR_Reg(0x18, 0x04);
+	SCCB_WR_Reg(0x19, 0x02);
+	SCCB_WR_Reg(0x1a, 0x7b);
+	SCCB_WR_Reg(0x03, 0x06);
+	SCCB_WR_Reg(0x0c, 0x04);
+	SCCB_WR_Reg(0x3e, 0x00);
+	SCCB_WR_Reg(0x70, 0x3a);
+	SCCB_WR_Reg(0x71, 0x35);
+	SCCB_WR_Reg(0x72, 0x11);
+	SCCB_WR_Reg(0x73, 0x00);
+	SCCB_WR_Reg(0xa2, 0x02);
+	SCCB_WR_Reg(0x11, 0x81);
+	
+	SCCB_WR_Reg(0x7a, 0x20);
+	SCCB_WR_Reg(0x7b, 0x1c);
+	SCCB_WR_Reg(0x7c, 0x28);
+	SCCB_WR_Reg(0x7d, 0x3c);
+	SCCB_WR_Reg(0x7e, 0x55);
+	SCCB_WR_Reg(0x7f, 0x68);
+	SCCB_WR_Reg(0x80, 0x76);
+	SCCB_WR_Reg(0x81, 0x80);
+	SCCB_WR_Reg(0x82, 0x88);
+	SCCB_WR_Reg(0x83, 0x8f);
+	SCCB_WR_Reg(0x84, 0x96);
+	SCCB_WR_Reg(0x85, 0xa3);
+	SCCB_WR_Reg(0x86, 0xaf);
+	SCCB_WR_Reg(0x87, 0xc4);
+	SCCB_WR_Reg(0x88, 0xd7);
+	SCCB_WR_Reg(0x89, 0xe8);
+	
+	SCCB_WR_Reg(0x13, 0xe0);
+	SCCB_WR_Reg(0x00, 0x00);
+	
+	SCCB_WR_Reg(0x10, 0x00);
+	SCCB_WR_Reg(0x0d, 0x00);
+	SCCB_WR_Reg(0x14, 0x28);
+	SCCB_WR_Reg(0xa5, 0x05);
+	SCCB_WR_Reg(0xab, 0x07);
+	SCCB_WR_Reg(0x24, 0x75);
+	SCCB_WR_Reg(0x25, 0x63);
+	SCCB_WR_Reg(0x26, 0xA5);
+	SCCB_WR_Reg(0x9f, 0x78);
+	SCCB_WR_Reg(0xa0, 0x68);
+	SCCB_WR_Reg(0xa1, 0x03);
+	SCCB_WR_Reg(0xa6, 0xdf);
+	SCCB_WR_Reg(0xa7, 0xdf);
+	SCCB_WR_Reg(0xa8, 0xf0);
+	SCCB_WR_Reg(0xa9, 0x90);
+	SCCB_WR_Reg(0xaa, 0x94);
+	SCCB_WR_Reg(0x13, 0xe5);
+
+	SCCB_WR_Reg(0x0e, 0x61);
+	SCCB_WR_Reg(0x0f, 0x4b);
+	SCCB_WR_Reg(0x16, 0x02);
+	SCCB_WR_Reg(0x1e, 0x07);
+	SCCB_WR_Reg(0x21, 0x02);
+	SCCB_WR_Reg(0x22, 0x91);
+	SCCB_WR_Reg(0x29, 0x07);
+	SCCB_WR_Reg(0x33, 0x0b);
+	SCCB_WR_Reg(0x35, 0x0b);
+	SCCB_WR_Reg(0x37, 0x1d);
+	SCCB_WR_Reg(0x38, 0x71);
+	SCCB_WR_Reg(0x39, 0x2a);
+	SCCB_WR_Reg(0x3c, 0x78);
+	SCCB_WR_Reg(0x4d, 0x40);
+	SCCB_WR_Reg(0x4e, 0x20);
+	SCCB_WR_Reg(0x69, 0x00);
+	SCCB_WR_Reg(0x6b, 0x60);
+	SCCB_WR_Reg(0x74, 0x19);
+	SCCB_WR_Reg(0x8d, 0x4f);
+	SCCB_WR_Reg(0x8e, 0x00);
+	SCCB_WR_Reg(0x8f, 0x00);
+	SCCB_WR_Reg(0x90, 0x00);
+	SCCB_WR_Reg(0x91, 0x00);
+	SCCB_WR_Reg(0x92, 0x00);
+	SCCB_WR_Reg(0x96, 0x00);
+	SCCB_WR_Reg(0x9a, 0x80);
+	SCCB_WR_Reg(0xb0, 0x84);
+	SCCB_WR_Reg(0xb1, 0x0c);
+	SCCB_WR_Reg(0xb2, 0x0e);
+	SCCB_WR_Reg(0xb3, 0x82);
+	SCCB_WR_Reg(0xb8, 0x0a);
+
+
+
+	SCCB_WR_Reg(0x43, 0x14);
+	SCCB_WR_Reg(0x44, 0xf0);
+	SCCB_WR_Reg(0x45, 0x34);
+	SCCB_WR_Reg(0x46, 0x58);
+	SCCB_WR_Reg(0x47, 0x28);
+	SCCB_WR_Reg(0x48, 0x3a);
+	SCCB_WR_Reg(0x59, 0x88);
+	SCCB_WR_Reg(0x5a, 0x88);
+	SCCB_WR_Reg(0x5b, 0x44);
+	SCCB_WR_Reg(0x5c, 0x67);
+	SCCB_WR_Reg(0x5d, 0x49);
+	SCCB_WR_Reg(0x5e, 0x0e);
+	SCCB_WR_Reg(0x64, 0x04);
+	SCCB_WR_Reg(0x65, 0x20);
+	SCCB_WR_Reg(0x66, 0x05);
+	SCCB_WR_Reg(0x94, 0x04);
+	SCCB_WR_Reg(0x95, 0x08);
+	SCCB_WR_Reg(0x6c, 0x0a);
+	SCCB_WR_Reg(0x6d, 0x55);
+	SCCB_WR_Reg(0x6e, 0x11);
+	SCCB_WR_Reg(0x6f, 0x9f);
+	SCCB_WR_Reg(0x6a, 0x40);
+	SCCB_WR_Reg(0x01, 0x40);
+	SCCB_WR_Reg(0x02, 0x40);
+	SCCB_WR_Reg(0x13, 0xe7);
+	SCCB_WR_Reg(0x15, 0x00);  
+	
+	
+	SCCB_WR_Reg(0x4f, 0x80);
+	SCCB_WR_Reg(0x50, 0x80);
+	SCCB_WR_Reg(0x51, 0x00);
+	SCCB_WR_Reg(0x52, 0x22);
+	SCCB_WR_Reg(0x53, 0x5e);
+	SCCB_WR_Reg(0x54, 0x80);
+	SCCB_WR_Reg(0x58, 0x9e);
+	
+	SCCB_WR_Reg(0x41, 0x08);
+	SCCB_WR_Reg(0x3f, 0x00);
+	SCCB_WR_Reg(0x75, 0x05);
+	SCCB_WR_Reg(0x76, 0xe1);
+	SCCB_WR_Reg(0x4c, 0x00);
+	SCCB_WR_Reg(0x77, 0x01);
+	SCCB_WR_Reg(0x3d, 0xc2);	
+	SCCB_WR_Reg(0x4b, 0x09);
+	SCCB_WR_Reg(0xc9, 0x60);
+	SCCB_WR_Reg(0x41, 0x38);
+	SCCB_WR_Reg(0x56, 0x40);
+	
+	SCCB_WR_Reg(0x34, 0x11);
+	SCCB_WR_Reg(0x3b, 0x02); 
+								
+	SCCB_WR_Reg(0xa4, 0x89);
+	SCCB_WR_Reg(0x96, 0x00);
+	SCCB_WR_Reg(0x97, 0x30);
+	SCCB_WR_Reg(0x98, 0x20);
+	SCCB_WR_Reg(0x99, 0x30);
+	SCCB_WR_Reg(0x9a, 0x84);
+	SCCB_WR_Reg(0x9b, 0x29);
+	SCCB_WR_Reg(0x9c, 0x03);
+	SCCB_WR_Reg(0x9d, 0x4c);
+	SCCB_WR_Reg(0x9e, 0x3f);
+	SCCB_WR_Reg(0x78, 0x04);
+	
+	SCCB_WR_Reg(0x79, 0x01);
+	SCCB_WR_Reg(0xc8, 0xf0);
+	SCCB_WR_Reg(0x79, 0x0f);
+	SCCB_WR_Reg(0xc8, 0x00);
+	SCCB_WR_Reg(0x79, 0x10);
+	SCCB_WR_Reg(0xc8, 0x7e);
+	SCCB_WR_Reg(0x79, 0x0a);
+	SCCB_WR_Reg(0xc8, 0x80);
+	SCCB_WR_Reg(0x79, 0x0b);
+	SCCB_WR_Reg(0xc8, 0x01);
+	SCCB_WR_Reg(0x79, 0x0c);
+	SCCB_WR_Reg(0xc8, 0x0f);
+	SCCB_WR_Reg(0x79, 0x0d);
+	SCCB_WR_Reg(0xc8, 0x20);
+	SCCB_WR_Reg(0x79, 0x09);
+	SCCB_WR_Reg(0xc8, 0x80);
+	SCCB_WR_Reg(0x79, 0x02);
+	SCCB_WR_Reg(0xc8, 0xc0);
+	SCCB_WR_Reg(0x79, 0x03);
+	SCCB_WR_Reg(0xc8, 0x40);
+	SCCB_WR_Reg(0x79, 0x05);
+	SCCB_WR_Reg(0xc8, 0x30);
+	SCCB_WR_Reg(0x79, 0x26); 
+	SCCB_WR_Reg(0x09, 0x00);	
+
+    //网上找的另一个程序
+    /*SCCB_WR_Reg(0x3a, 0x04);
+    SCCB_WR_Reg(0x40, 0x10);
+    SCCB_WR_Reg(0x12, 0x14);
+    SCCB_WR_Reg(0x32, 0x80);
+    SCCB_WR_Reg(0x17, 0x17);
+    SCCB_WR_Reg(0x18, 0x05);
+    SCCB_WR_Reg(0x19, 0x02);
+    SCCB_WR_Reg(0x1a, 0x7b);//0x7a,
+    SCCB_WR_Reg(0x03, 0x0a);//0x0a,
+    SCCB_WR_Reg(0x0c, 0x0c);//反高低
+    SCCB_WR_Reg(0x3e, 0x00);//
+    SCCB_WR_Reg(0x70, 0x00);
+    SCCB_WR_Reg(0x71, 0x01);
+    SCCB_WR_Reg(0x72, 0x11);
+    SCCB_WR_Reg(0x73, 0x09);//
+    SCCB_WR_Reg(0xa2, 0x02);
+    SCCB_WR_Reg(0x11, 0x00);
+    SCCB_WR_Reg(0x7a, 0x20);
+    SCCB_WR_Reg(0x7b, 0x1c);
+    SCCB_WR_Reg(0x7c, 0x28);
+    SCCB_WR_Reg(0x7d, 0x3c);
+    SCCB_WR_Reg(0x7e, 0x55);
+    SCCB_WR_Reg(0x7f, 0x68);
+    SCCB_WR_Reg(0x80, 0x76);
+    SCCB_WR_Reg(0x81, 0x80);
+    SCCB_WR_Reg(0x82, 0x88);
+    SCCB_WR_Reg(0x83, 0x8f);
+    SCCB_WR_Reg(0x84, 0x96);
+    SCCB_WR_Reg(0x85, 0xa3);
+    SCCB_WR_Reg(0x86, 0xaf);
+    SCCB_WR_Reg(0x87, 0xc4);
+    SCCB_WR_Reg(0x88, 0xd7);
+    SCCB_WR_Reg(0x89, 0xe8);
+    SCCB_WR_Reg(0x13, 0xe0);
+    SCCB_WR_Reg(0x00, 0x00);
+    SCCB_WR_Reg(0x10, 0x00);
+    SCCB_WR_Reg(0x0d, 0x00);
+    SCCB_WR_Reg(0x14, 0x38);
+    SCCB_WR_Reg(0xa5, 0x05);
+    SCCB_WR_Reg(0xab, 0x07);
+    SCCB_WR_Reg(0x24, 0x75);
+    SCCB_WR_Reg(0x25, 0x63);
+    SCCB_WR_Reg(0x26, 0xA5);
+    SCCB_WR_Reg(0x9f, 0x78);
+    SCCB_WR_Reg(0xa0, 0x68);
+    SCCB_WR_Reg(0xa1, 0x03);//0x0b,
+    SCCB_WR_Reg(0xa6, 0xdf);//0xd8,
+    SCCB_WR_Reg(0xa7, 0xdf);//0xd8,
+    SCCB_WR_Reg(0xa8, 0xf0);
+    SCCB_WR_Reg(0xa9, 0x90);
+    SCCB_WR_Reg(0xaa, 0x94);
+    SCCB_WR_Reg(0x13, 0xe5);
+    SCCB_WR_Reg(0x0e, 0x61);
+    SCCB_WR_Reg(0x0f, 0x4b);
+    SCCB_WR_Reg(0x16, 0x02);
+    SCCB_WR_Reg(0x1e, 0x27);//0x07,
+    SCCB_WR_Reg(0x21, 0x02);
+    SCCB_WR_Reg(0x22, 0x91);
+    SCCB_WR_Reg(0x29, 0x07);
+    SCCB_WR_Reg(0x33, 0x0b);
+    SCCB_WR_Reg(0x35, 0x0b);
+    SCCB_WR_Reg(0x37, 0x1d);
+    SCCB_WR_Reg(0x38, 0x71);
+    SCCB_WR_Reg(0x39, 0x2a);
+    SCCB_WR_Reg(0x3c, 0x78);
+    SCCB_WR_Reg(0x4d, 0x40);
+    SCCB_WR_Reg(0x4e, 0x20);
+    SCCB_WR_Reg(0x69, 0x5d);
+    SCCB_WR_Reg(0x6b, 0x40);//PLL
+    SCCB_WR_Reg(0x74, 0x19);
+    SCCB_WR_Reg(0x8d, 0x4f);
+    SCCB_WR_Reg(0x8e, 0x00);
+    SCCB_WR_Reg(0x8f, 0x00);
+    SCCB_WR_Reg(0x90, 0x00);
+    SCCB_WR_Reg(0x91, 0x00);
+    SCCB_WR_Reg(0x92, 0x00);//0x19,//0x66
+    SCCB_WR_Reg(0x96, 0x00);
+    SCCB_WR_Reg(0x9a, 0x80);
+    SCCB_WR_Reg(0xb0, 0x84);
+    SCCB_WR_Reg(0xb1, 0x0c);
+    SCCB_WR_Reg(0xb2, 0x0e);
+    SCCB_WR_Reg(0xb3, 0x82);
+    SCCB_WR_Reg(0xb8, 0x0a);
+    SCCB_WR_Reg(0x43, 0x14);
+    SCCB_WR_Reg(0x44, 0xf0);
+    SCCB_WR_Reg(0x45, 0x34);
+    SCCB_WR_Reg(0x46, 0x58);
+    SCCB_WR_Reg(0x47, 0x28);
+    SCCB_WR_Reg(0x48, 0x3a);
+    SCCB_WR_Reg(0x59, 0x88);
+    SCCB_WR_Reg(0x5a, 0x88);
+    SCCB_WR_Reg(0x5b, 0x44);
+    SCCB_WR_Reg(0x5c, 0x67);
+    SCCB_WR_Reg(0x5d, 0x49);
+    SCCB_WR_Reg(0x5e, 0x0e);
+    SCCB_WR_Reg(0x64, 0x04);
+    SCCB_WR_Reg(0x65, 0x20);
+    SCCB_WR_Reg(0x66, 0x05);
+    SCCB_WR_Reg(0x94, 0x04);
+    SCCB_WR_Reg(0x95, 0x08);
+    SCCB_WR_Reg(0x6c, 0x0a);
+    SCCB_WR_Reg(0x6d, 0x55);
+    SCCB_WR_Reg(0x6e, 0x11);
+    SCCB_WR_Reg(0x6f, 0x9f);
+    SCCB_WR_Reg(0x6a, 0x40);
+    //SCCB_WR_Reg(0x01, 0x60);
+    //SCCB_WR_Reg(0x02, 0x60);
+    SCCB_WR_Reg(0x13, 0xe7);
+    SCCB_WR_Reg(0x15, 0x00);
+    SCCB_WR_Reg(0x4f, 0x80);
+    SCCB_WR_Reg(0x50, 0x80);
+    SCCB_WR_Reg(0x51, 0x00);
+    SCCB_WR_Reg(0x52, 0x22);
+    SCCB_WR_Reg(0x53, 0x5e);
+    SCCB_WR_Reg(0x54, 0x80);
+    SCCB_WR_Reg(0x55, 0x00);//亮度
+    SCCB_WR_Reg(0x56, 0x60);//对比度
+    SCCB_WR_Reg(0x57, 0x90);
+    SCCB_WR_Reg(0x58, 0x9e);
+    SCCB_WR_Reg(0x41, 0x08);
+    SCCB_WR_Reg(0x3f, 0x05);//边缘增强调整
+    SCCB_WR_Reg(0x75, 0x05);
+    SCCB_WR_Reg(0x76, 0xe1);
+    SCCB_WR_Reg(0x4c, 0x0F);//噪声抑制强度
+    SCCB_WR_Reg(0x77, 0x0a);
+    SCCB_WR_Reg(0x3d, 0xc2);    //0xc0,
+    SCCB_WR_Reg(0x4b, 0x09);
+    SCCB_WR_Reg(0xc9, 0xc8);
+    SCCB_WR_Reg(0x41, 0x38);
+
+    SCCB_WR_Reg(0x34, 0x11);
+    SCCB_WR_Reg(0x3b, 0x02);//0x00,//0x02,
+    SCCB_WR_Reg(0xa4, 0x89);//0x88,
+    SCCB_WR_Reg(0x96, 0x00);
+    SCCB_WR_Reg(0x97, 0x30);
+    SCCB_WR_Reg(0x98, 0x20);
+    SCCB_WR_Reg(0x99, 0x30);
+    SCCB_WR_Reg(0x9a, 0x84);
+    SCCB_WR_Reg(0x9b, 0x29);
+    SCCB_WR_Reg(0x9c, 0x03);
+    SCCB_WR_Reg(0x9d, 0x4c);
+    SCCB_WR_Reg(0x9e, 0x3f);
+    SCCB_WR_Reg(0x78, 0x04);
+    SCCB_WR_Reg(0x79, 0x01);
+    SCCB_WR_Reg(0xc8, 0xf0);
+    SCCB_WR_Reg(0x79, 0x0f);
+    SCCB_WR_Reg(0xc8, 0x00);
+    SCCB_WR_Reg(0x79, 0x10);
+    SCCB_WR_Reg(0xc8, 0x7e);
+    SCCB_WR_Reg(0x79, 0x0a);
+    SCCB_WR_Reg(0xc8, 0x80);
+    SCCB_WR_Reg(0x79, 0x0b);
+    SCCB_WR_Reg(0xc8, 0x01);
+    SCCB_WR_Reg(0x79, 0x0c);
+    SCCB_WR_Reg(0xc8, 0x0f);
+    SCCB_WR_Reg(0x79, 0x0d);
+    SCCB_WR_Reg(0xc8, 0x20);
+    SCCB_WR_Reg(0x79, 0x09);
+    SCCB_WR_Reg(0xc8, 0x80);
+    SCCB_WR_Reg(0x79, 0x02);
+    SCCB_WR_Reg(0xc8, 0xc0);
+    SCCB_WR_Reg(0x79, 0x03);
+    SCCB_WR_Reg(0xc8, 0x40);
+    SCCB_WR_Reg(0x79, 0x05);
+    SCCB_WR_Reg(0xc8, 0x30);
+    SCCB_WR_Reg(0x69, 0xaa);//
+    SCCB_WR_Reg(0x09, 0x00);
+    SCCB_WR_Reg(0x3b, 0x42);
+    SCCB_WR_Reg(0x2d, 0x01);
+
+    // SCCB_WR_Reg(0x71, 0x81); //彩条*/
+
+    //不知道怎么算的 设置其它的输出不对
+    CAM_SetWindow(184, 10, 320, 240);
+
+    CAM_DCMI_Init();
+    CAM_SetDMA();
+    return 0;
+}

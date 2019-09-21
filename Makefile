@@ -38,10 +38,20 @@ BUILD_DIR = build
 # C sources
 C_SOURCES =  \
 User/main.c \
+User/common.c \
+User/debug.c \
 User/stm32f4xx_it.c \
 User/system_stm32f4xx.c \
+Camera/camera.c \
+Camera/sccb.c \
+LCD/lcd.c \
+Libs/src/misc.c \
 Libs/src/stm32f4xx_rcc.c \
-Libs/src/stm32f4xx_gpio.c
+Libs/src/stm32f4xx_gpio.c \
+Libs/src/stm32f4xx_dma.c \
+Libs/src/stm32f4xx_usart.c \
+Libs/src/stm32f4xx_fsmc.c \
+Libs/src/stm32f4xx_dcmi.c
 
 # ASM sources
 ASM_SOURCES =  \
@@ -101,7 +111,9 @@ AS_INCLUDES =
 C_INCLUDES =  \
 -ILibs/inc \
 -ILibs \
--IUser
+-IUser \
+-ICamera \
+-ILCD
 
 # compile gcc flags
 ASFLAGS = $(MCU) $(AS_DEFS) $(AS_INCLUDES) $(OPT) -Wall -fdata-sections -ffunction-sections
@@ -124,7 +136,7 @@ CFLAGS += -MMD -MP -MF"$(@:%.o=%.d)"
 LDSCRIPT = STM32F407ZGTx_FLASH.ld
 
 # libraries
-LIBS = -lc -lm 
+LIBS = -lc -lm -lnosys
 LIBDIR = 
 LDFLAGS = $(MCU) -T$(LDSCRIPT) $(LIBDIR) $(LIBS) -Wl,-Map=$(BUILD_DIR)/$(TARGET).map,--cref -Wl,--gc-sections
 

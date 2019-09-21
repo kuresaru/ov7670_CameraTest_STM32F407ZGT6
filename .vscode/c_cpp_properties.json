@@ -3,17 +3,24 @@
         {
             "name": "Win32",
             "includePath": [
+                "D:/DevTools/GNU Tools ARM Embedded/4.7 2013q1/arm-none-eabi/include/**",
                 "${workspaceFolder}/Libs/inc/*",
                 "${workspaceFolder}/libs/*",
-                "${workspaceFolder}/User/*"
+                "${workspaceFolder}/User/*",
+                "${workspaceFolder}/Camera/*",
+                "${workspaceFolder}/LCD/*"
             ],
             "defines": [
                 "_DEBUG",
                 "UNICODE",
-                "_UNICODE"
+                "_UNICODE",
+                "USE_STDPERIPH_DRIVER",
+                "STM32F407xx",
+                "STM32F40_41xxx"
             ],
+            "compilerPath": "D:/DevTools/GNU Tools ARM Embedded/4.7 2013q1/bin/arm-none-eabi-gcc.exe",
             "cStandard": "c11",
-            "intelliSenseMode": "clang-x64"
+            "intelliSenseMode": "gcc-x64"
         }
     ],
     "version": 4
